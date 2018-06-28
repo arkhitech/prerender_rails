@@ -20,6 +20,9 @@ module Rack
         'bingbot',
         'baiduspider',
         'facebookexternalhit',
+        'facebot',
+        'Whatsapp',
+        'Go-http-client',
         'twitterbot',
         'adsbot-google',
         'mediapartners-google',
@@ -76,6 +79,7 @@ module Rack
     end
 
     def call(env)
+
       if should_show_prerendered_page(env)
         # the before_render callback can return a string of HTML that
         # gets converted to a rack response
@@ -94,13 +98,14 @@ module Rack
         end
       end
 
-      @app.call(env)  
+      @app.call(env)
     end
 
     def should_show_prerendered_page(env)
       user_agent = env['HTTP_USER_AGENT']
       return false if !user_agent
       return false if env['REQUEST_METHOD'] != 'GET'
+      return false if env['X-Prerender-Request'] == 1 #don't run into infinite loop
 
       request = Rack::Request.new(env)
 
@@ -116,7 +121,7 @@ module Rack
           blacklistedUrl || blacklistedReferer
         }
         return false
-      end 
+      end
 
       return true if Rack::Utils.parse_query(request.query_string).has_key?('_escaped_fragment_')
 
@@ -139,6 +144,7 @@ module Rack
 
         headers = { 'User-Agent' => env['HTTP_USER_AGENT'] }
         headers['X-Prerender-Token'] = ENV['PRERENDER_TOKEN'] if ENV['PRERENDER_TOKEN']
+        headers['X-Prerender-Request'] = 1
 
         req = Net::HTTP::Get.new(prerender_url.request_uri, headers)
         http = Net::HTTP.new(prerender_url.host, prerender_url.port)
@@ -171,7 +177,7 @@ module Rack
     def build_rack_resposne_from_prerender(prerendered_response)
       response = Rack::Response.new
 
-      # Pass through only applicable 
+      # Pass through only applicable
       prerendered_response.each do |name, val|
         next if DISALLOWED_PHANTOMJS_HEADERS.include? name
         response[name] = val
@@ -185,9 +191,9 @@ module Rack
 
     def before_render(env)
       return nil unless @options[:before_render]
-      
+
       cached_render = @options[:before_render].call(env)
-      
+
       if cached_render && cached_render.is_a?(String)
         response = Rack::Response.new(cached_render, 200, [])
         response['Content-Type'] = 'text/html'
