@@ -18,7 +18,7 @@ module Rack
         'http_request2',# From pocket reader?
         'digg',
         'pubexchange',
-        'socialflow'
+        'socialflow',
         'twitterbot',
         'rogerbot',
         'linkedinbot',
