@@ -1,19 +1,9 @@
 module Rack
   class Prerender
     require 'net/http'
-
-    DISALLOWED_PHANTOMJS_HEADERS = %w(
-      cache-control
-      content-length
-      transfer-encoding
-      connection
-      date
-    )
+    require 'active_support'
 
     def initialize(app, options={})
-      # googlebot, yahoo, and bingbot are in this list even though
-      # we support _escaped_fragment_ to ensure it works for people
-      # who might not use the _escaped_fragment_ protocol
       @crawler_user_agents = [
         'googlebot',
         'yahoo',
@@ -21,9 +11,7 @@ module Rack
         'baiduspider',
         'facebookexternalhit',
         'facebot',
-        'Whatsapp',
         'Go-http-client',
-        'twitterbot',
         'adsbot-google',
         'mediapartners-google',
         'outbrain',     # Outbrain needs to see prerender
@@ -31,6 +19,32 @@ module Rack
         'digg',
         'pubexchange',
         'socialflow'
+        'twitterbot',
+        'rogerbot',
+        'linkedinbot',
+        'embedly',
+        'bufferbot',
+        'quora link preview',
+        'showyoubot',
+        'outbrain',
+        'pinterest/0.',
+        'developers.google.com/+/web/snippet',
+        'www.google.com/webmasters/tools/richsnippets',
+        'slackbot',
+        'vkShare',
+        'W3C_Validator',
+        'redditbot',
+        'Applebot',
+        'WhatsApp',
+        'flipboard',
+        'tumblr',
+        'bitlybot',
+        'SkypeUriPreview',
+        'nuzzel',
+        'Discordbot',
+        'Google Page Speed',
+        'Qwantify',
+        'Chrome-Lighthouse'
       ]
 
       @extensions_to_ignore = [
@@ -45,6 +59,8 @@ module Rack
         '.pdf',
         '.doc',
         '.txt',
+        '.ico',
+        '.rss',
         '.zip',
         '.mp3',
         '.rar',
@@ -73,26 +89,28 @@ module Rack
       ]
 
       @options = options
-      @options[:whitelist]      = [@options[:whitelist]] if @options[:whitelist].is_a? String
-      @options[:blacklist]      = [@options[:blacklist]] if @options[:blacklist].is_a? String
+      @options[:whitelist] = [@options[:whitelist]] if @options[:whitelist].is_a? String
+      @options[:blacklist] = [@options[:blacklist]] if @options[:blacklist].is_a? String
+      @extensions_to_ignore = @options[:extensions_to_ignore] if @options[:extensions_to_ignore]
+      @crawler_user_agents = @options[:crawler_user_agents] if @options[:crawler_user_agents]
       @app = app
     end
+
 
     def call(env)
 
       if should_show_prerendered_page(env)
-        # the before_render callback can return a string of HTML that
-        # gets converted to a rack response
+
         cached_response = before_render(env)
 
-        if cached_response && cached_response.is_a?(Rack::Response)
+        if cached_response
           return cached_response.finish
         end
 
         prerendered_response = get_prerendered_page_response(env)
 
         if prerendered_response
-          response = build_rack_resposne_from_prerender(prerendered_response)
+          response = build_rack_response_from_prerender(prerendered_response)
           after_render(env, prerendered_response)
           return response.finish
         end
@@ -101,21 +119,43 @@ module Rack
       @app.call(env)
     end
 
+
     def should_show_prerendered_page(env)
       user_agent = env['HTTP_USER_AGENT']
+      buffer_agent = env['HTTP_X_BUFFERBOT']
+      prerender_agent = env['HTTP_X_PRERENDER']
+      is_requesting_prerendered_page = false
+
       return false if !user_agent
       return false if env['REQUEST_METHOD'] != 'GET'
       return false if env['X-Prerender-Request'] == 1 #don't run into infinite loop
 
       request = Rack::Request.new(env)
 
-      #if it is a bot and not requesting a resource and is not blacklisted(url or referer)...dont prerender
+      is_requesting_prerendered_page = true if Rack::Utils.parse_query(request.query_string).has_key?('_escaped_fragment_')
+
+      #if it is a bot...show prerendered page
+      is_requesting_prerendered_page = true if @crawler_user_agents.any? { |crawler_user_agent| user_agent.downcase.include?(crawler_user_agent.downcase) }
+
+      #if it is BufferBot...show prerendered page
+      is_requesting_prerendered_page = true if buffer_agent
+
+      #if it is Prerender...don't show prerendered page
+      is_requesting_prerendered_page = false if prerender_agent
+
+      #if it is a bot and is requesting a resource...dont prerender
+      return false if @extensions_to_ignore.any? { |extension| request.fullpath.include? extension }
+
+      #if it is a bot and not requesting a resource and is not whitelisted...dont prerender
+      return false if @options[:whitelist].is_a?(Array) && @options[:whitelist].all? { |whitelisted| !Regexp.new(whitelisted).match(request.fullpath) }
+
+      #if it is a bot and not requesting a resource and is blacklisted(url or referer)...dont prerender
       if @options[:blacklist].is_a?(Array) && @options[:blacklist].any? { |blacklisted|
           blacklistedUrl = false
           blacklistedReferer = false
           regex = Regexp.new(blacklisted)
 
-          blacklistedUrl = !!regex.match(request.path)
+          blacklistedUrl = !!regex.match(request.fullpath) && !!regex.match(request.host)
           blacklistedReferer = !!regex.match(request.referer) if request.referer
 
           blacklistedUrl || blacklistedReferer
@@ -123,69 +163,71 @@ module Rack
         return false
       end
 
-      return true if Rack::Utils.parse_query(request.query_string).has_key?('_escaped_fragment_')
-
-      #if it is not a bot...dont prerender
-      return false if @crawler_user_agents.all? { |crawler_user_agent| !user_agent.downcase.include?(crawler_user_agent.downcase) }
-
-      #if it is a bot and is requesting a resource...dont prerender
-      return false if @extensions_to_ignore.any? { |extension| request.path.include? extension }
-
-      #if it is a bot and not requesting a resource and is not whitelisted...dont prerender
-      return false if @options[:whitelist].is_a?(Array) && @options[:whitelist].all? { |whitelisted| !Regexp.new(whitelisted).match(request.path) }
-
-      return true
+      return is_requesting_prerendered_page
     end
+
 
     def get_prerendered_page_response(env)
       begin
-        request = Rack::Request.new(env)
-        prerender_url = URI.parse(build_api_url(env))
-
-        headers = { 'User-Agent' => env['HTTP_USER_AGENT'] }
+        url = URI.parse(build_api_url(env))
+        headers = {
+          'User-Agent' => env['HTTP_USER_AGENT'],
+          'Accept-Encoding' => 'gzip'
+        }
         headers['X-Prerender-Token'] = ENV['PRERENDER_TOKEN'] if ENV['PRERENDER_TOKEN']
-        headers['X-Prerender-Request'] = 1
-
-        req = Net::HTTP::Get.new(prerender_url.request_uri, headers)
-        http = Net::HTTP.new(prerender_url.host, prerender_url.port)
-
-        http.use_ssl = true if prerender_with_fastboot?(request)
-        Rails.logger.info "*** Prerendering with #{prerender_url}"
-        response = http.start { |http| http.request(req) }
+        headers['X-Prerender-Token'] = @options[:prerender_token] if @options[:prerender_token]
+        req = Net::HTTP::Get.new(url.request_uri, headers)
+        req.basic_auth(ENV['PRERENDER_USERNAME'], ENV['PRERENDER_PASSWORD']) if @options[:basic_auth]
+        http = Net::HTTP.new(url.host, url.port)
+        http.use_ssl = true if url.scheme == 'https'
+        response = http.request(req)
+        if response['Content-Encoding'] == 'gzip'
+          response.body = ActiveSupport::Gzip.decompress(response.body)
+          response['Content-Length'] = response.body.length
+          response.delete('Content-Encoding')
+        end
+        response
       rescue
         nil
       end
     end
 
+
     def build_api_url(env)
-      request = Rack::Request.new(env)
-      if prerender_with_fastboot?(request)
-        fastboot_uri = URI(ENV['FASTBOOT_URL'])
-        fastboot_uri.query = "path=#{request.path}"
-        fastboot_uri.to_s
-      else
-        prerender_url = get_prerender_service_url()
-        forward_slash = prerender_url[-1, 1] == '/' ? '' : '/'
-        "#{prerender_url}#{forward_slash}#{request.url}"
+      new_env = env
+      if env["CF-VISITOR"]
+        match = /"scheme":"(http|https)"/.match(env['CF-VISITOR'])
+        new_env["HTTPS"] = true and new_env["rack.url_scheme"] = "https" and new_env["SERVER_PORT"] = 443 if (match && match[1] == "https")
+        new_env["HTTPS"] = false and new_env["rack.url_scheme"] = "http" and new_env["SERVER_PORT"] = 80 if (match && match[1] == "http")
       end
+
+      if env["X-FORWARDED-PROTO"]
+        new_env["HTTPS"] = true and new_env["rack.url_scheme"] = "https" and new_env["SERVER_PORT"] = 443 if env["X-FORWARDED-PROTO"].split(',')[0] == "https"
+        new_env["HTTPS"] = false and new_env["rack.url_scheme"] = "http" and new_env["SERVER_PORT"] = 80 if env["X-FORWARDED-PROTO"].split(',')[0] == "http"
+      end
+
+      if @options[:protocol]
+        new_env["HTTPS"] = true and new_env["rack.url_scheme"] = "https" and new_env["SERVER_PORT"] = 443 if @options[:protocol] == "https"
+        new_env["HTTPS"] = false and new_env["rack.url_scheme"] = "http" and new_env["SERVER_PORT"] = 80 if @options[:protocol] == "http"
+      end
+
+      url = Rack::Request.new(new_env).url
+      prerender_url = get_prerender_service_url()
+      forward_slash = prerender_url[-1, 1] == '/' ? '' : '/'
+      "#{prerender_url}#{forward_slash}#{url}"
     end
+
 
     def get_prerender_service_url
-      @options[:prerender_service_url] || ENV['PRERENDER_SERVICE_URL'] || 'http://prerender.herokuapp.com/'
+      @options[:prerender_service_url] || ENV['PRERENDER_SERVICE_URL'] || 'http://service.prerender.io/'
     end
 
-    def build_rack_resposne_from_prerender(prerendered_response)
-      response = Rack::Response.new
 
-      # Pass through only applicable
-      prerendered_response.each do |name, val|
-        next if DISALLOWED_PHANTOMJS_HEADERS.include? name
-        response[name] = val
-      end
+    def build_rack_response_from_prerender(prerendered_response)
+      response = Rack::Response.new(prerendered_response.body, prerendered_response.code, prerendered_response.header)
 
-      # Set response status and content body
-      response.status = prerendered_response.code
-      response.write prerendered_response.body
+      @options[:build_rack_response_from_prerender].call(response, prerendered_response) if @options[:build_rack_response_from_prerender]
+
       response
     end
 
@@ -195,13 +237,14 @@ module Rack
       cached_render = @options[:before_render].call(env)
 
       if cached_render && cached_render.is_a?(String)
-        response = Rack::Response.new(cached_render, 200, [])
-        response['Content-Type'] = 'text/html'
-        response
+        Rack::Response.new(cached_render, 200, { 'Content-Type' => 'text/html; charset=utf-8' })
+      elsif cached_render && cached_render.is_a?(Rack::Response)
+        cached_render
       else
         nil
       end
     end
+
 
     def after_render(env, response)
       return true unless @options[:after_render]
